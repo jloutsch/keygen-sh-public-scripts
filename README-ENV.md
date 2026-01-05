@@ -14,8 +14,8 @@ This guide explains how to set up your environment file for the Keygen API scrip
 3. **Test your configuration:**
    ```bash
    # For Bash
-   ./create_policy_v2.sh
-   
+   ./create_policy.sh
+
    # For PowerShell
    .\Create-Policy.ps1
    ```

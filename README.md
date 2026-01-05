@@ -6,9 +6,42 @@ This repository contains bash scripts for creating policies and licenses via the
 
 - **Keygen Account**: Access to a Keygen Cloud account or self-hosted instance
 - **API Token**: A valid API token with appropriate permissions
-- **Python 3**: Required for JSON parsing (pre-installed on most systems)
-- **curl**: For API requests (pre-installed on most systems)
-- **bash**: Unix shell (available on macOS, Linux, and Windows with WSL)
+
+### For Bash Scripts (Linux recommended)
+- **Bash 4.0+**: Required for associative arrays and `mapfile`
+- **Python 3**: Required for JSON parsing
+- **curl**: For API requests
+
+### For PowerShell Scripts (Windows/macOS recommended)
+- **PowerShell 5.1+** (Windows) or **PowerShell Core 7+** (macOS/Linux)
+
+---
+
+## macOS Users: Choose Your Path
+
+macOS ships with Bash 3.2, which is incompatible with the bash scripts. Choose one option:
+
+### Option A: Use PowerShell Core (Recommended)
+```bash
+# Install PowerShell Core via Homebrew
+brew install powershell/tap/powershell
+
+# Run scripts with:
+pwsh ./Create-Policy.ps1
+pwsh ./Create-License.ps1
+```
+
+### Option B: Install Bash 4+
+```bash
+# Install modern Bash via Homebrew
+brew install bash
+
+# Run scripts with the new bash:
+/opt/homebrew/bin/bash ./create_policy.sh   # Apple Silicon
+/usr/local/bin/bash ./create_policy.sh      # Intel Mac
+```
+
+---
 
 ## Setup
 
@@ -31,13 +64,13 @@ KEYGEN_API_TOKEN=your-api-token-here
 ### 2. Make Scripts Executable
 
 ```bash
-chmod +x create_policy_v2.sh
+chmod +x create_policy.sh
 chmod +x create_license.sh
 ```
 
 ## Scripts Overview
 
-### 📋 Policy Creation Script (`create_policy_v2.sh`)
+### 📋 Policy Creation Script (`create_policy.sh`)
 
 Creates policies with predefined attributes and optional entitlements.
 
@@ -71,7 +104,7 @@ Creates licenses under existing policies with automatic entitlement inheritance.
 
 1. **Run the script:**
    ```bash
-   ./create_policy_v2.sh
+   ./create_policy.sh
    ```
 
 2. **Follow the interactive prompts:**
@@ -162,12 +195,15 @@ This approach keeps policy management simple while providing per-license flexibi
 ## File Structure
 
 ```
-keygen-api/
-├── .env                    # Environment configuration
-├── create_policy_v2.sh     # Policy creation script
-├── create_license.sh       # License creation script
-├── README.md              # This documentation
-└── keygen.md              # Claude Code development guide
+keygen-scripts/
+├── .env                    # Environment configuration (create from .env.example)
+├── .env.example            # Example environment configuration
+├── create_policy.sh        # Policy creation script (Bash)
+├── create_license.sh       # License creation script (Bash)
+├── Create-Policy.ps1       # Policy creation script (PowerShell)
+├── Create-License.ps1      # License creation script (PowerShell)
+├── README.md               # This documentation
+└── README-ENV.md           # Environment configuration guide
 ```
 
 ## Troubleshooting
