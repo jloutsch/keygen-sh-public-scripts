@@ -21,6 +21,20 @@
 set -euo pipefail
 
 #-------------------------------------------------------------------------------
+# BASH VERSION CHECK
+#-------------------------------------------------------------------------------
+# Requires Bash 4.0+ for associative arrays and mapfile
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "Error: This script requires Bash 4.0 or higher"
+    echo "Your version: ${BASH_VERSION}"
+    echo ""
+    echo "On macOS, install a newer version with: brew install bash"
+    echo "Then run with: /opt/homebrew/bin/bash $0"
+    echo "Or use the PowerShell version: pwsh ./Create-License.ps1"
+    exit 1
+fi
+
+#-------------------------------------------------------------------------------
 # CONFIGURATION
 #-------------------------------------------------------------------------------
 # Terminal color codes for formatted output
@@ -50,15 +64,17 @@ load_env() {
             if [[ "$line" =~ ^([^=]+)=(.*)$ ]]; then
                 local key="${BASH_REMATCH[1]}"
                 local value="${BASH_REMATCH[2]}"
-                # Trim whitespace from key
-                key=$(echo "$key" | xargs)
-                # Remove surrounding quotes from value if present
-                value="${value#\"}"
-                value="${value%\"}"
-                value="${value#\'}"
-                value="${value%\'}"
-                # Export the variable
-                export "$key=$value"
+                # Trim whitespace from key (safer than xargs)
+                key="${key#"${key%%[![:space:]]*}"}"  # trim leading
+                key="${key%"${key##*[![:space:]]}"}"  # trim trailing
+                # Remove surrounding quotes from value if present (handles nested quotes)
+                if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+                    value="${BASH_REMATCH[1]}"
+                fi
+                # Validate key contains only safe characters before export
+                if [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+                    export "$key=$value"
+                fi
             fi
         done < "$env_file"
     fi
@@ -107,6 +123,9 @@ if [ -z "${KEYGEN_API_TOKEN:-}" ]; then
     exit 1
 fi
 
+# Strip trailing slash from API URL to prevent double slashes
+KEYGEN_API_URL="${KEYGEN_API_URL%/}"
+
 #-------------------------------------------------------------------------------
 # API REQUEST FUNCTION
 #-------------------------------------------------------------------------------
@@ -154,7 +173,8 @@ api_request() {
         local response_body=$(echo "$response" | sed '$d')
 
         # Success (2xx) or client error (4xx) - don't retry
-        if [[ "$http_code" =~ ^[23] ]] || [[ "$http_code" =~ ^4 ]]; then
+        # Note: 3xx redirects should be handled by curl automatically, but if we get one, retry
+        if [[ "$http_code" =~ ^2 ]] || [[ "$http_code" =~ ^4 ]]; then
             echo "$response"
             return 0
         fi
@@ -202,7 +222,8 @@ fetch_all_pages() {
         fi
 
         # Merge data arrays - pass existing data via stdin to avoid shell interpolation
-        all_data=$(printf '%s\n%s' "$all_data" "$response_body" | python3 -c "
+        local py_result
+        py_result=$(printf '%s\n%s' "$all_data" "$response_body" | python3 -c "
 import json
 import sys
 
@@ -212,7 +233,12 @@ new_response = json.loads(lines[1]) if len(lines) > 1 else {}
 new_data = new_response.get('data', [])
 existing.extend(new_data)
 print(json.dumps(existing))
-" 2>/dev/null)
+" 2>&1) || {
+            echo -e "${RED}Error: Failed to parse API response${NC}" >&2
+            echo "$py_result" >&2
+            return 1
+        }
+        all_data="$py_result"
 
         # Check if there are more pages by comparing returned count to page size
         local data_count
@@ -221,7 +247,10 @@ import json
 import sys
 data = json.load(sys.stdin)
 print(len(data.get('data', [])))
-" 2>/dev/null)
+" 2>&1) || {
+            echo -e "${RED}Error: Failed to parse page count${NC}" >&2
+            return 1
+        }
 
         if [ "$data_count" -lt "$per_page" ]; then
             has_more=false
@@ -236,7 +265,7 @@ import json
 import sys
 data = json.load(sys.stdin)
 print(json.dumps({'data': data}))
-" 2>/dev/null
+"
 }
 
 #-------------------------------------------------------------------------------
@@ -304,9 +333,7 @@ select_policy() {
 
             # Fetch all policies with pagination
             local response
-            response=$(fetch_all_pages "policies")
-
-            if [ $? -ne 0 ]; then
+            if ! response=$(fetch_all_pages "policies"); then
                 echo -e "${RED}Failed to fetch policies${NC}"
                 exit 1
             fi
@@ -350,7 +377,10 @@ if matches:
         print(f\"ID:{p['id']}\")
 else:
     print('NO_MATCHES')
-" "$search_term" 2>/dev/null)
+" "$search_term" 2>&1) || {
+                echo -e "${RED}Failed to parse policies response${NC}"
+                exit 1
+            }
 
             if [[ "$matching_policies" == *"NO_MATCHES"* ]] || [ -z "$matching_policies" ]; then
                 echo -e "${RED}No policies found matching '${search_term}'${NC}"
@@ -389,11 +419,20 @@ else:
             #-------------------------------------------------------------------
             # Direct ID entry - user provides the exact policy UUID
             #-------------------------------------------------------------------
-            read -p "Enter exact policy ID: " selected_policy_id
-            if [ -z "$selected_policy_id" ]; then
-                echo -e "${RED}Policy ID cannot be empty${NC}"
-                exit 1
-            fi
+            while true; do
+                read -p "Enter exact policy ID (UUID format): " selected_policy_id
+                if [ -z "$selected_policy_id" ]; then
+                    echo -e "${RED}Policy ID cannot be empty${NC}"
+                    continue
+                fi
+                # Validate UUID format (8-4-4-4-12 hexadecimal)
+                if [[ "$selected_policy_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+                    break
+                else
+                    echo -e "${RED}Invalid UUID format. Expected format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx${NC}"
+                    echo -e "${YELLOW}Example: a1b2c3d4-e5f6-7890-abcd-ef1234567890${NC}"
+                fi
+            done
             ;;
 
         3)
@@ -403,9 +442,7 @@ else:
             echo -e "\n${YELLOW}Fetching all policies...${NC}"
 
             local response
-            response=$(fetch_all_pages "policies")
-
-            if [ $? -ne 0 ]; then
+            if ! response=$(fetch_all_pages "policies"); then
                 echo -e "${RED}Failed to fetch policies${NC}"
                 exit 1
             fi
@@ -444,7 +481,10 @@ if policies:
         print(f\"ID:{p['id']}\")
 else:
     print('NO_POLICIES')
-" 2>/dev/null)
+" 2>&1) || {
+                echo -e "${RED}Failed to parse policies response${NC}"
+                exit 1
+            }
 
             if [[ "$all_policies" == *"NO_POLICIES"* ]] || [ -z "$all_policies" ]; then
                 echo -e "${RED}No policies found${NC}"
@@ -663,6 +703,23 @@ fi
 # Step 4: Build and send the API request
 #-------------------------------------------------------------------------------
 json_payload=$(build_license_payload "$selected_policy_id" "$license_name" "$metadata_json")
+
+#-------------------------------------------------------------------------------
+# Confirmation prompt
+#-------------------------------------------------------------------------------
+echo -e "\n${YELLOW}Summary:${NC}"
+echo -e "  Policy ID: ${selected_policy_id}"
+echo -e "  License name: ${license_name}"
+if [ ${#metadata_map[@]} -gt 0 ]; then
+    echo -e "  Metadata: ${#metadata_map[@]} field(s)"
+fi
+echo -e "  Entitlements: Inherited from policy"
+echo ""
+read -p "Create this license? [y/N]: " confirm
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    echo -e "${YELLOW}Cancelled by user${NC}"
+    exit 0
+fi
 
 echo -e "\n${YELLOW}Creating license...${NC}"
 

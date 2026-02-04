@@ -21,6 +21,34 @@
 set -euo pipefail
 
 #-------------------------------------------------------------------------------
+# BASH VERSION CHECK
+#-------------------------------------------------------------------------------
+# Requires Bash 4.0+ for associative arrays and mapfile
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "Error: This script requires Bash 4.0 or higher"
+    echo "Your version: ${BASH_VERSION}"
+    echo ""
+    echo "On macOS, install a newer version with: brew install bash"
+    echo "Then run with: /opt/homebrew/bin/bash $0"
+    echo "Or use the PowerShell version: pwsh ./Create-Policy.ps1"
+    exit 1
+fi
+
+#-------------------------------------------------------------------------------
+# TEMP FILE CLEANUP
+#-------------------------------------------------------------------------------
+# Track temp files for cleanup on exit
+declare -a TEMP_FILES=()
+
+cleanup_temp_files() {
+    for f in "${TEMP_FILES[@]:-}"; do
+        [ -f "$f" ] && rm -f "$f"
+    done
+}
+
+trap cleanup_temp_files EXIT INT TERM
+
+#-------------------------------------------------------------------------------
 # CONFIGURATION
 #-------------------------------------------------------------------------------
 # Terminal color codes for formatted output
@@ -50,15 +78,17 @@ load_env() {
             if [[ "$line" =~ ^([^=]+)=(.*)$ ]]; then
                 local key="${BASH_REMATCH[1]}"
                 local value="${BASH_REMATCH[2]}"
-                # Trim whitespace from key
-                key=$(echo "$key" | xargs)
-                # Remove surrounding quotes from value if present
-                value="${value#\"}"
-                value="${value%\"}"
-                value="${value#\'}"
-                value="${value%\'}"
-                # Export the variable
-                export "$key=$value"
+                # Trim whitespace from key (safer than xargs)
+                key="${key#"${key%%[![:space:]]*}"}"  # trim leading
+                key="${key%"${key##*[![:space:]]}"}"  # trim trailing
+                # Remove surrounding quotes from value if present (handles nested quotes)
+                if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+                    value="${BASH_REMATCH[1]}"
+                fi
+                # Validate key contains only safe characters before export
+                if [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+                    export "$key=$value"
+                fi
             fi
         done < "$env_file"
     fi
@@ -108,6 +138,9 @@ if [ -z "${KEYGEN_API_TOKEN:-}" ]; then
     exit 1
 fi
 
+# Strip trailing slash from API URL to prevent double slashes
+KEYGEN_API_URL="${KEYGEN_API_URL%/}"
+
 #-------------------------------------------------------------------------------
 # API REQUEST FUNCTION
 #-------------------------------------------------------------------------------
@@ -153,7 +186,8 @@ api_request() {
         local http_code=$(echo "$response" | tail -n 1)
 
         # Success (2xx) or client error (4xx) - don't retry
-        if [[ "$http_code" =~ ^[23] ]] || [[ "$http_code" =~ ^4 ]]; then
+        # Note: 3xx redirects should be handled by curl automatically, but if we get one, retry
+        if [[ "$http_code" =~ ^2 ]] || [[ "$http_code" =~ ^4 ]]; then
             echo "$response"
             return 0
         fi
@@ -201,7 +235,8 @@ fetch_all_pages() {
         fi
 
         # Merge data arrays - pass existing data via stdin to avoid shell interpolation
-        all_data=$(printf '%s\n%s' "$all_data" "$response_body" | python3 -c "
+        local py_result
+        py_result=$(printf '%s\n%s' "$all_data" "$response_body" | python3 -c "
 import json
 import sys
 
@@ -211,7 +246,12 @@ new_response = json.loads(lines[1]) if len(lines) > 1 else {}
 new_data = new_response.get('data', [])
 existing.extend(new_data)
 print(json.dumps(existing))
-" 2>/dev/null)
+" 2>&1) || {
+            echo -e "${RED}Error: Failed to parse API response${NC}" >&2
+            echo "$py_result" >&2
+            return 1
+        }
+        all_data="$py_result"
 
         # Check if there are more pages by comparing returned count to page size
         local data_count
@@ -220,7 +260,10 @@ import json
 import sys
 data = json.load(sys.stdin)
 print(len(data.get('data', [])))
-" 2>/dev/null)
+" 2>&1) || {
+            echo -e "${RED}Error: Failed to parse page count${NC}" >&2
+            return 1
+        }
 
         if [ "$data_count" -lt "$per_page" ]; then
             has_more=false
@@ -235,7 +278,7 @@ import json
 import sys
 data = json.load(sys.stdin)
 print(json.dumps({'data': data}))
-" 2>/dev/null
+"
 }
 
 #-------------------------------------------------------------------------------
@@ -280,9 +323,7 @@ select_product() {
     echo "Fetching available products..."
 
     local response
-    response=$(fetch_all_pages "products")
-
-    if [ $? -ne 0 ]; then
+    if ! response=$(fetch_all_pages "products"); then
         echo -e "${RED}Failed to fetch products${NC}"
         exit 1
     fi
@@ -314,7 +355,10 @@ if products:
         print(f\"ID:{p['id']}\")
 else:
     print('NO_PRODUCTS')
-" 2>/dev/null)
+" 2>&1) || {
+        echo -e "${RED}Failed to parse products response${NC}"
+        exit 1
+    }
 
     if [[ "$products_output" == *"NO_PRODUCTS"* ]] || [ -z "$products_output" ]; then
         echo -e "${RED}No products found in your account${NC}"
@@ -426,9 +470,7 @@ select_entitlements() {
     echo "Fetching available entitlements..."
 
     local response
-    response=$(fetch_all_pages "entitlements")
-
-    if [ $? -ne 0 ]; then
+    if ! response=$(fetch_all_pages "entitlements"); then
         echo -e "${RED}Failed to fetch entitlements${NC}"
         exit 1
     fi
@@ -438,8 +480,9 @@ select_entitlements() {
     #---------------------------------------------------------------------------
     local temp_file
     temp_file=$(mktemp)
+    TEMP_FILES+=("$temp_file")
 
-    echo "$response" | python3 -c "
+    if ! echo "$response" | python3 -c "
 import json
 import sys
 
@@ -467,7 +510,11 @@ if entitlements:
         print(f\"DATA\\t{e['id']}\\t{e['name']}\\t{e['code']}\")
 else:
     print('NO_ENTITLEMENTS')
-" > "$temp_file" 2>/dev/null
+" > "$temp_file" 2>&1; then
+        echo -e "${RED}Failed to parse entitlements response${NC}"
+        cat "$temp_file" >&2
+        exit 1
+    fi
 
     local entitlements_output
     entitlements_output=$(cat "$temp_file")
@@ -691,6 +738,23 @@ else
 fi
 
 echo -e "\n${GREEN}Creating policy: ${policy_name}${NC}"
+
+#-------------------------------------------------------------------------------
+# Confirmation prompt
+#-------------------------------------------------------------------------------
+echo -e "\n${YELLOW}Summary:${NC}"
+echo -e "  Product ID: ${selected_product_id}"
+echo -e "  Policy name: ${policy_name}"
+echo -e "  Entitlements: ${entitlement_names}"
+if [ ${#metadata_map[@]} -gt 0 ]; then
+    echo -e "  Metadata: ${#metadata_map[@]} field(s)"
+fi
+echo ""
+read -p "Create this policy? [y/N]: " confirm
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    echo -e "${YELLOW}Cancelled by user${NC}"
+    exit 0
+fi
 
 #-------------------------------------------------------------------------------
 # Build metadata JSON safely using null-separated pairs

@@ -30,11 +30,12 @@ $script:RETRY_DELAY = 2      # Seconds to wait between retries
 # OUTPUT HELPER FUNCTIONS
 #-------------------------------------------------------------------------------
 # Color-coded output functions for consistent formatting
+# Named to avoid shadowing built-in cmdlets (Write-Error, Write-Warning)
 
-function Write-Success { Write-Host $args -ForegroundColor Green }
-function Write-Error { Write-Host $args -ForegroundColor Red }
-function Write-Warning { Write-Host $args -ForegroundColor Yellow }
-function Write-Info { Write-Host $args -ForegroundColor Cyan }
+function Write-SuccessMessage { param([Parameter(ValueFromRemainingArguments=$true)]$Message) Write-Host ($Message -join ' ') -ForegroundColor Green }
+function Write-ErrorMessage { param([Parameter(ValueFromRemainingArguments=$true)]$Message) Write-Host ($Message -join ' ') -ForegroundColor Red }
+function Write-WarningMessage { param([Parameter(ValueFromRemainingArguments=$true)]$Message) Write-Host ($Message -join ' ') -ForegroundColor Yellow }
+function Write-InfoMessage { param([Parameter(ValueFromRemainingArguments=$true)]$Message) Write-Host ($Message -join ' ') -ForegroundColor Cyan }
 
 #-------------------------------------------------------------------------------
 # ENVIRONMENT LOADING
@@ -53,9 +54,12 @@ if (Test-Path $envFile) {
         if ($_ -match '^([^=]+)=(.*)$') {
             $name = $matches[1].Trim()
             $value = $matches[2]
-            # Remove surrounding quotes if present
-            $value = $value -replace '^["'']|["'']$', ''
-            if (![string]::IsNullOrWhiteSpace($name)) {
+            # Remove surrounding quotes if present (handles both single and double quotes)
+            if ($value -match '^"(.*)"$' -or $value -match "^'(.*)'$") {
+                $value = $matches[1]
+            }
+            # Validate key contains only safe characters
+            if ($name -match '^[a-zA-Z_][a-zA-Z0-9_]*$') {
                 [Environment]::SetEnvironmentVariable($name, $value, [EnvironmentVariableTarget]::Process)
             }
         }
@@ -72,24 +76,27 @@ $script:KEYGEN_ACCOUNT_ID = [Environment]::GetEnvironmentVariable("KEYGEN_ACCOUN
 $script:KEYGEN_API_TOKEN = [Environment]::GetEnvironmentVariable("KEYGEN_API_TOKEN")
 
 if ([string]::IsNullOrWhiteSpace($script:KEYGEN_API_URL)) {
-    Write-Error "Error: KEYGEN_API_URL is not set"
+    Write-ErrorMessage "Error: KEYGEN_API_URL is not set"
     Write-Host "Please add it to your .env file or set it as an environment variable"
     exit 1
 }
 
 if ([string]::IsNullOrWhiteSpace($script:KEYGEN_ACCOUNT_ID)) {
-    Write-Error "Error: KEYGEN_ACCOUNT_ID is not set"
+    Write-ErrorMessage "Error: KEYGEN_ACCOUNT_ID is not set"
     Write-Host "Please add it to your .env file or set it as an environment variable"
     exit 1
 }
 
 if ([string]::IsNullOrWhiteSpace($script:KEYGEN_API_TOKEN)) {
-    Write-Error "Error: KEYGEN_API_TOKEN is not set"
+    Write-ErrorMessage "Error: KEYGEN_API_TOKEN is not set"
     Write-Host "Please add it to your .env file or set it as an environment variable"
     exit 1
 }
 
-Write-Success "=== Keygen Policy Creation Script ==="
+# Strip trailing slash from API URL to prevent double slashes
+$script:KEYGEN_API_URL = $script:KEYGEN_API_URL.TrimEnd('/')
+
+Write-SuccessMessage "=== Keygen Policy Creation Script ==="
 Write-Host ""
 
 #-------------------------------------------------------------------------------
@@ -147,7 +154,7 @@ function Invoke-KeygenAPI {
 
             # Client errors (4xx) - don't retry
             if ($statusCode -ge 400 -and $statusCode -lt 500) {
-                Write-Error "API request failed (HTTP $statusCode)"
+                Write-ErrorMessage "API request failed (HTTP $statusCode)"
                 if ($responseBody) {
                     Write-Host "Response: $responseBody"
                 }
@@ -156,11 +163,11 @@ function Invoke-KeygenAPI {
 
             # Server errors (5xx) or connection issues - retry with delay
             if ($attempt -lt $script:MAX_RETRIES) {
-                Write-Warning "Request failed (HTTP $statusCode), retrying in $($script:RETRY_DELAY)s... (attempt $attempt/$($script:MAX_RETRIES))"
+                Write-WarningMessage "Request failed (HTTP $statusCode), retrying in $($script:RETRY_DELAY)s... (attempt $attempt/$($script:MAX_RETRIES))"
                 Start-Sleep -Seconds $script:RETRY_DELAY
             }
             else {
-                Write-Error "API request failed after $($script:MAX_RETRIES) attempts (HTTP $statusCode)"
+                Write-ErrorMessage "API request failed after $($script:MAX_RETRIES) attempts (HTTP $statusCode)"
                 if ($responseBody) {
                     Write-Host "Response: $responseBody"
                 }
@@ -253,18 +260,18 @@ function Test-ValidNumber {
 # Fetches all products and prompts user to select one.
 # Policies must be associated with a product.
 
-Write-Info "Step 1: Select Product"
-Write-Warning "Fetching available products..."
+Write-InfoMessage "Step 1: Select Product"
+Write-WarningMessage "Fetching available products..."
 
 $products = Get-AllPages -Endpoint "products"
 
 if (-not $products -or $products.Count -eq 0) {
-    Write-Error "No products found"
+    Write-ErrorMessage "No products found"
     exit 1
 }
 
 # Display available products
-Write-Success "Available products:"
+Write-SuccessMessage "Available products:"
 for ($i = 0; $i -lt $products.Count; $i++) {
     $product = $products[$i]
     $num = $i + 1
@@ -276,14 +283,14 @@ for ($i = 0; $i -lt $products.Count; $i++) {
 # Auto-select if only one product, otherwise prompt
 if ($products.Count -eq 1) {
     $PRODUCT_ID = $products[0].id
-    Write-Success "Using the only available product"
+    Write-SuccessMessage "Using the only available product"
 }
 else {
     do {
         $selection = Read-Host "Select product number (1-$($products.Count))"
         $valid = Test-ValidNumber -Input $selection -Min 1 -Max $products.Count
         if (-not $valid) {
-            Write-Error "Invalid selection. Please enter a number between 1 and $($products.Count)"
+            Write-ErrorMessage "Invalid selection. Please enter a number between 1 and $($products.Count)"
         }
     } while (-not $valid)
 
@@ -291,7 +298,7 @@ else {
     $PRODUCT_ID = $selectedProduct.id
 }
 
-Write-Success "Selected product ID: $PRODUCT_ID"
+Write-SuccessMessage "Selected product ID: $PRODUCT_ID"
 Write-Host ""
 
 #-------------------------------------------------------------------------------
@@ -299,15 +306,15 @@ Write-Host ""
 #-------------------------------------------------------------------------------
 # Collects customer name (for policy naming) and optional metadata.
 
-Write-Info "Step 2: Policy Details"
-Write-Warning "Enter the customer name for the policy:"
+Write-InfoMessage "Step 2: Policy Details"
+Write-WarningMessage "Enter the customer name for the policy:"
 Write-Host "Example format: CUSTOMER NAME Service Contract Test Policy - <entitlement names>"
 
 # Get customer name (required)
 do {
     $script:customerName = Read-Host "Customer name"
     if ([string]::IsNullOrWhiteSpace($script:customerName)) {
-        Write-Error "Error: Customer name cannot be empty"
+        Write-ErrorMessage "Error: Customer name cannot be empty"
     }
 } while ([string]::IsNullOrWhiteSpace($script:customerName))
 
@@ -315,7 +322,7 @@ do {
 # Metadata collection (optional key-value pairs)
 #---------------------------------------------------------------------------
 Write-Host ""
-Write-Warning "Policy Metadata:"
+Write-WarningMessage "Policy Metadata:"
 Write-Host "You can add custom metadata key-value pairs to this policy"
 Write-Host "Examples: 'Customer Code', 'Department', 'Contract Number', etc."
 Write-Host ""
@@ -328,7 +335,7 @@ while ($true) {
     # Empty input signals end of metadata entry
     if ([string]::IsNullOrWhiteSpace($metaKey)) {
         if ($script:metadata.Count -eq 0) {
-            Write-Warning "No metadata added"
+            Write-WarningMessage "No metadata added"
         }
         break
     }
@@ -336,12 +343,12 @@ while ($true) {
     $metaValue = Read-Host "Enter value for '$metaKey'"
 
     if ([string]::IsNullOrWhiteSpace($metaValue)) {
-        Write-Warning "Warning: Empty value, skipping this metadata"
+        Write-WarningMessage "Warning: Empty value, skipping this metadata"
         continue
     }
 
     $script:metadata[$metaKey] = $metaValue
-    Write-Success "Added: $metaKey = $metaValue"
+    Write-SuccessMessage "Added: $metaKey = $metaValue"
 }
 
 #-------------------------------------------------------------------------------
@@ -351,8 +358,8 @@ while ($true) {
 # Entitlements define what features/capabilities a license grants.
 
 Write-Host ""
-Write-Info "Step 3: Select Entitlements"
-Write-Warning "Fetching available entitlements..."
+Write-InfoMessage "Step 3: Select Entitlements"
+Write-WarningMessage "Fetching available entitlements..."
 
 $entitlements = Get-AllPages -Endpoint "entitlements"
 
@@ -361,7 +368,7 @@ $entitlementNames = "None"
 
 if ($entitlements -and $entitlements.Count -gt 0) {
     # Display available entitlements
-    Write-Success "Available entitlements:"
+    Write-SuccessMessage "Available entitlements:"
 
     for ($i = 0; $i -lt $entitlements.Count; $i++) {
         $entitlement = $entitlements[$i]
@@ -378,7 +385,7 @@ if ($entitlements -and $entitlements.Count -gt 0) {
     # Prompt for multi-selection (space-separated numbers)
     #---------------------------------------------------------------------------
     Write-Host ""
-    Write-Warning "Select entitlements for this policy:"
+    Write-WarningMessage "Select entitlements for this policy:"
     Write-Host "You can select multiple entitlements by entering their numbers separated by spaces"
     Write-Host "Examples: '1 3' for entitlements 1 and 3, or '1 2 4' for entitlements 1, 2, and 4"
     Write-Host "Or enter '0' for no entitlements"
@@ -405,10 +412,10 @@ if ($entitlements -and $entitlements.Count -gt 0) {
                 }
 
                 $selectedNames += $displayName
-                Write-Success "Selected: $($ent.attributes.name) ($($ent.attributes.code))"
+                Write-SuccessMessage "Selected: $($ent.attributes.name) ($($ent.attributes.code))"
             }
             else {
-                Write-Warning "Invalid selection: $sel (skipping)"
+                Write-WarningMessage "Invalid selection: $sel (skipping)"
             }
         }
 
@@ -416,12 +423,12 @@ if ($entitlements -and $entitlements.Count -gt 0) {
         if ($selectedNames.Count -gt 0) {
             $entitlementNames = $selectedNames -join ", "
             Write-Host ""
-            Write-Success "Selected entitlements: $entitlementNames"
+            Write-SuccessMessage "Selected entitlements: $entitlementNames"
         }
     }
 }
 else {
-    Write-Warning "No entitlements found - creating policy without entitlements"
+    Write-WarningMessage "No entitlements found - creating policy without entitlements"
 }
 
 #-------------------------------------------------------------------------------
@@ -429,7 +436,7 @@ else {
 #-------------------------------------------------------------------------------
 
 Write-Host ""
-Write-Info "Step 4: Create Policy"
+Write-InfoMessage "Step 4: Create Policy"
 
 # Build final policy name (includes entitlement names for easy identification)
 if ($entitlementNames -ne "None") {
@@ -439,7 +446,25 @@ else {
     $policyName = "$($script:customerName) Service Contract Test Policy"
 }
 
-Write-Success "Creating policy: $policyName"
+Write-SuccessMessage "Creating policy: $policyName"
+
+#---------------------------------------------------------------------------
+# Confirmation prompt
+#---------------------------------------------------------------------------
+Write-Host ""
+Write-WarningMessage "Summary:"
+Write-Host "  Product ID: $PRODUCT_ID"
+Write-Host "  Policy name: $policyName"
+Write-Host "  Entitlements: $entitlementNames"
+if ($script:metadata.Count -gt 0) {
+    Write-Host "  Metadata: $($script:metadata.Count) field(s)"
+}
+Write-Host ""
+$confirm = Read-Host "Create this policy? [y/N]"
+if ($confirm -notmatch '^[Yy]$') {
+    Write-WarningMessage "Cancelled by user"
+    exit 0
+}
 
 #---------------------------------------------------------------------------
 # Build policy payload with predefined attributes
@@ -497,24 +522,24 @@ $policyPayload = @{
 #---------------------------------------------------------------------------
 # Send policy creation request
 #---------------------------------------------------------------------------
-Write-Warning "Sending request to Keygen API..."
+Write-WarningMessage "Sending request to Keygen API..."
 $response = Invoke-KeygenAPI -Method "POST" -Endpoint "policies" -Body $policyPayload
 
 #-------------------------------------------------------------------------------
 # Step 5: Handle response and attach entitlements
 #-------------------------------------------------------------------------------
 if ($response -and $response.data) {
-    Write-Success ""
-    Write-Success "Policy created successfully!"
+    Write-SuccessMessage ""
+    Write-SuccessMessage "Policy created successfully!"
     $policyId = $response.data.id
-    Write-Success "Policy ID: $policyId"
+    Write-SuccessMessage "Policy ID: $policyId"
 
     #---------------------------------------------------------------------------
     # Attach entitlements if any were selected
     #---------------------------------------------------------------------------
     if ($selectedEntitlements.Count -gt 0) {
         Write-Host ""
-        Write-Warning "Attaching entitlements to policy..."
+        Write-WarningMessage "Attaching entitlements to policy..."
 
         # Build entitlements payload
         $entitlementsData = @()
@@ -529,10 +554,10 @@ if ($response -and $response.data) {
         $attachResponse = Invoke-KeygenAPI -Method "POST" -Endpoint "policies/$policyId/entitlements" -Body $attachPayload
 
         if ($attachResponse) {
-            Write-Success "Entitlements attached successfully!"
+            Write-SuccessMessage "Entitlements attached successfully!"
         }
         else {
-            Write-Warning "Policy created but failed to attach entitlements"
+            Write-WarningMessage "Policy created but failed to attach entitlements"
         }
     }
 
@@ -540,29 +565,29 @@ if ($response -and $response.data) {
     # Display creation summary
     #---------------------------------------------------------------------------
     Write-Host ""
-    Write-Success "======================================"
-    Write-Success "Policy Creation Complete!"
-    Write-Success "======================================"
+    Write-SuccessMessage "======================================"
+    Write-SuccessMessage "Policy Creation Complete!"
+    Write-SuccessMessage "======================================"
     Write-Host "Name: " -NoNewline
-    Write-Info $policyName
+    Write-InfoMessage $policyName
     Write-Host "Product ID: " -NoNewline
-    Write-Info $PRODUCT_ID
+    Write-InfoMessage $PRODUCT_ID
     Write-Host "Entitlements: " -NoNewline
-    Write-Info $entitlementNames
+    Write-InfoMessage $entitlementNames
     Write-Host "Policy ID: " -NoNewline
-    Write-Info $policyId
+    Write-InfoMessage $policyId
     if ($script:metadata.Count -gt 0) {
         Write-Host "Metadata: " -NoNewline
-        Write-Info "Yes (custom metadata added)"
+        Write-InfoMessage "Yes (custom metadata added)"
     }
 
     Write-Host ""
-    Write-Success "Script completed successfully!"
+    Write-SuccessMessage "Script completed successfully!"
 }
 else {
     #---------------------------------------------------------------------------
     # Handle API errors
     #---------------------------------------------------------------------------
-    Write-Error "Failed to create policy"
+    Write-ErrorMessage "Failed to create policy"
     exit 1
 }

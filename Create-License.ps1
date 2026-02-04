@@ -30,11 +30,12 @@ $script:RETRY_DELAY = 2      # Seconds to wait between retries
 # OUTPUT HELPER FUNCTIONS
 #-------------------------------------------------------------------------------
 # Color-coded output functions for consistent formatting
+# Named to avoid shadowing built-in cmdlets (Write-Error, Write-Warning)
 
-function Write-Success { Write-Host $args -ForegroundColor Green }
-function Write-Error { Write-Host $args -ForegroundColor Red }
-function Write-Warning { Write-Host $args -ForegroundColor Yellow }
-function Write-Info { Write-Host $args -ForegroundColor Cyan }
+function Write-SuccessMessage { param([Parameter(ValueFromRemainingArguments=$true)]$Message) Write-Host ($Message -join ' ') -ForegroundColor Green }
+function Write-ErrorMessage { param([Parameter(ValueFromRemainingArguments=$true)]$Message) Write-Host ($Message -join ' ') -ForegroundColor Red }
+function Write-WarningMessage { param([Parameter(ValueFromRemainingArguments=$true)]$Message) Write-Host ($Message -join ' ') -ForegroundColor Yellow }
+function Write-InfoMessage { param([Parameter(ValueFromRemainingArguments=$true)]$Message) Write-Host ($Message -join ' ') -ForegroundColor Cyan }
 
 #-------------------------------------------------------------------------------
 # ENVIRONMENT LOADING
@@ -53,9 +54,12 @@ if (Test-Path $envFile) {
         if ($_ -match '^([^=]+)=(.*)$') {
             $name = $matches[1].Trim()
             $value = $matches[2]
-            # Remove surrounding quotes if present
-            $value = $value -replace '^["'']|["'']$', ''
-            if (![string]::IsNullOrWhiteSpace($name)) {
+            # Remove surrounding quotes if present (handles both single and double quotes)
+            if ($value -match '^"(.*)"$' -or $value -match "^'(.*)'$") {
+                $value = $matches[1]
+            }
+            # Validate key contains only safe characters
+            if ($name -match '^[a-zA-Z_][a-zA-Z0-9_]*$') {
                 [Environment]::SetEnvironmentVariable($name, $value, [EnvironmentVariableTarget]::Process)
             }
         }
@@ -72,24 +76,27 @@ $script:KEYGEN_ACCOUNT_ID = [Environment]::GetEnvironmentVariable("KEYGEN_ACCOUN
 $script:KEYGEN_API_TOKEN = [Environment]::GetEnvironmentVariable("KEYGEN_API_TOKEN")
 
 if ([string]::IsNullOrWhiteSpace($script:KEYGEN_API_URL)) {
-    Write-Error "Error: KEYGEN_API_URL is not set"
+    Write-ErrorMessage "Error: KEYGEN_API_URL is not set"
     Write-Host "Please add it to your .env file or set it as an environment variable"
     exit 1
 }
 
 if ([string]::IsNullOrWhiteSpace($script:KEYGEN_ACCOUNT_ID)) {
-    Write-Error "Error: KEYGEN_ACCOUNT_ID is not set"
+    Write-ErrorMessage "Error: KEYGEN_ACCOUNT_ID is not set"
     Write-Host "Please add it to your .env file or set it as an environment variable"
     exit 1
 }
 
 if ([string]::IsNullOrWhiteSpace($script:KEYGEN_API_TOKEN)) {
-    Write-Error "Error: KEYGEN_API_TOKEN is not set"
+    Write-ErrorMessage "Error: KEYGEN_API_TOKEN is not set"
     Write-Host "Please add it to your .env file or set it as an environment variable"
     exit 1
 }
 
-Write-Success "=== Keygen License Creation Script ==="
+# Strip trailing slash from API URL to prevent double slashes
+$script:KEYGEN_API_URL = $script:KEYGEN_API_URL.TrimEnd('/')
+
+Write-SuccessMessage "=== Keygen License Creation Script ==="
 Write-Host ""
 
 #-------------------------------------------------------------------------------
@@ -147,7 +154,7 @@ function Invoke-KeygenAPI {
 
             # Client errors (4xx) - don't retry
             if ($statusCode -ge 400 -and $statusCode -lt 500) {
-                Write-Error "API request failed (HTTP $statusCode)"
+                Write-ErrorMessage "API request failed (HTTP $statusCode)"
                 if ($responseBody) {
                     Write-Host "Response: $responseBody"
                 }
@@ -156,11 +163,11 @@ function Invoke-KeygenAPI {
 
             # Server errors (5xx) or connection issues - retry with delay
             if ($attempt -lt $script:MAX_RETRIES) {
-                Write-Warning "Request failed (HTTP $statusCode), retrying in $($script:RETRY_DELAY)s... (attempt $attempt/$($script:MAX_RETRIES))"
+                Write-WarningMessage "Request failed (HTTP $statusCode), retrying in $($script:RETRY_DELAY)s... (attempt $attempt/$($script:MAX_RETRIES))"
                 Start-Sleep -Seconds $script:RETRY_DELAY
             }
             else {
-                Write-Error "API request failed after $($script:MAX_RETRIES) attempts (HTTP $statusCode)"
+                Write-ErrorMessage "API request failed after $($script:MAX_RETRIES) attempts (HTTP $statusCode)"
                 if ($responseBody) {
                     Write-Host "Response: $responseBody"
                 }
@@ -255,7 +262,7 @@ function Test-ValidNumber {
 #   Selected policy ID
 
 function Select-Policy {
-    Write-Warning "How would you like to find the policy?"
+    Write-WarningMessage "How would you like to find the policy?"
     Write-Host "1) Search by customer name/policy name"
     Write-Host "2) Enter exact policy ID"
     Write-Host "3) List all policies"
@@ -265,7 +272,7 @@ function Select-Policy {
         $searchChoice = Read-Host "Enter your choice (1-3)"
         $valid = Test-ValidNumber -Input $searchChoice -Min 1 -Max 3
         if (-not $valid) {
-            Write-Error "Invalid choice. Please select 1, 2, or 3"
+            Write-ErrorMessage "Invalid choice. Please select 1, 2, or 3"
         }
     } while (-not $valid)
 
@@ -276,12 +283,12 @@ function Select-Policy {
             #-------------------------------------------------------------------
             $searchTerm = Read-Host "Enter search term (partial name is OK)"
             Write-Host ""
-            Write-Warning "Searching for policies containing '$searchTerm'..."
+            Write-WarningMessage "Searching for policies containing '$searchTerm'..."
 
             $policies = Get-AllPages -Endpoint "policies"
 
             if (-not $policies -or $policies.Count -eq 0) {
-                Write-Error "Failed to fetch policies"
+                Write-ErrorMessage "Failed to fetch policies"
                 exit 1
             }
 
@@ -295,12 +302,12 @@ function Select-Policy {
             }
 
             if ($matchingPolicies.Count -eq 0) {
-                Write-Error "No policies found matching '$searchTerm'"
+                Write-ErrorMessage "No policies found matching '$searchTerm'"
                 exit 1
             }
 
             # Display matching policies
-            Write-Success "Found matching policies:"
+            Write-SuccessMessage "Found matching policies:"
             Write-Host ""
             for ($i = 0; $i -lt $matchingPolicies.Count; $i++) {
                 $policy = $matchingPolicies[$i]
@@ -325,7 +332,7 @@ function Select-Policy {
 
             # Auto-select if only one match, otherwise prompt
             if ($matchingPolicies.Count -eq 1) {
-                Write-Success "Using the only matching policy"
+                Write-SuccessMessage "Using the only matching policy"
                 return $matchingPolicies[0].id
             }
             else {
@@ -333,7 +340,7 @@ function Select-Policy {
                     $selection = Read-Host "Select policy number (1-$($matchingPolicies.Count))"
                     $valid = Test-ValidNumber -Input $selection -Min 1 -Max $matchingPolicies.Count
                     if (-not $valid) {
-                        Write-Error "Invalid selection. Please enter a number between 1 and $($matchingPolicies.Count)"
+                        Write-ErrorMessage "Invalid selection. Please enter a number between 1 and $($matchingPolicies.Count)"
                     }
                 } while (-not $valid)
 
@@ -345,10 +352,16 @@ function Select-Policy {
             #-------------------------------------------------------------------
             # Direct ID entry - user provides the exact policy UUID
             #-------------------------------------------------------------------
+            $uuidPattern = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
             do {
-                $policyId = Read-Host "Enter exact policy ID"
+                $policyId = Read-Host "Enter exact policy ID (UUID format)"
                 if ([string]::IsNullOrWhiteSpace($policyId)) {
-                    Write-Error "Policy ID cannot be empty"
+                    Write-ErrorMessage "Policy ID cannot be empty"
+                }
+                elseif ($policyId -notmatch $uuidPattern) {
+                    Write-ErrorMessage "Invalid UUID format. Expected format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                    Write-WarningMessage "Example: a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    $policyId = $null  # Reset to continue loop
                 }
             } while ([string]::IsNullOrWhiteSpace($policyId))
 
@@ -360,16 +373,16 @@ function Select-Policy {
             # List all - fetches and displays every policy for browsing
             #-------------------------------------------------------------------
             Write-Host ""
-            Write-Warning "Fetching all policies..."
+            Write-WarningMessage "Fetching all policies..."
 
             $policies = Get-AllPages -Endpoint "policies"
 
             if (-not $policies -or $policies.Count -eq 0) {
-                Write-Error "No policies found"
+                Write-ErrorMessage "No policies found"
                 exit 1
             }
 
-            Write-Success "Available policies:"
+            Write-SuccessMessage "Available policies:"
             Write-Host ""
 
             for ($i = 0; $i -lt $policies.Count; $i++) {
@@ -397,7 +410,7 @@ function Select-Policy {
                 $selection = Read-Host "Select policy number (1-$($policies.Count))"
                 $valid = Test-ValidNumber -Input $selection -Min 1 -Max $policies.Count
                 if (-not $valid) {
-                    Write-Error "Invalid selection. Please enter a number between 1 and $($policies.Count)"
+                    Write-ErrorMessage "Invalid selection. Please enter a number between 1 and $($policies.Count)"
                 }
             } while (-not $valid)
 
@@ -417,19 +430,19 @@ function Select-Policy {
 
 function Get-LicenseDetails {
     Write-Host ""
-    Write-Warning "License Details:"
+    Write-WarningMessage "License Details:"
 
     #---------------------------------------------------------------------------
     # License name input
     #---------------------------------------------------------------------------
-    Write-Info "Enter a name for this license"
+    Write-InfoMessage "Enter a name for this license"
     Write-Host "This can be an institution and department name, or any identifier"
     Write-Host "Example: 'University of Example - Physics Dept' or 'ACME Corp - Engineering'"
 
     do {
         $script:licenseName = Read-Host "License name"
         if ([string]::IsNullOrWhiteSpace($script:licenseName)) {
-            Write-Error "Error: License name cannot be empty"
+            Write-ErrorMessage "Error: License name cannot be empty"
         }
     } while ([string]::IsNullOrWhiteSpace($script:licenseName))
 
@@ -437,7 +450,7 @@ function Get-LicenseDetails {
     # Metadata collection (optional key-value pairs)
     #---------------------------------------------------------------------------
     Write-Host ""
-    Write-Warning "License Metadata:"
+    Write-WarningMessage "License Metadata:"
     Write-Host "You can add custom metadata key-value pairs to this license"
     Write-Host "Examples: 'Customer Code', 'Department', 'License Type', etc."
     Write-Host ""
@@ -450,7 +463,7 @@ function Get-LicenseDetails {
         # Empty input signals end of metadata entry
         if ([string]::IsNullOrWhiteSpace($metaKey)) {
             if ($script:metadata.Count -eq 0) {
-                Write-Warning "No metadata added"
+                Write-WarningMessage "No metadata added"
             }
             break
         }
@@ -458,19 +471,19 @@ function Get-LicenseDetails {
         $metaValue = Read-Host "Enter value for '$metaKey'"
 
         if ([string]::IsNullOrWhiteSpace($metaValue)) {
-            Write-Warning "Warning: Empty value, skipping this metadata"
+            Write-WarningMessage "Warning: Empty value, skipping this metadata"
             continue
         }
 
         $script:metadata[$metaKey] = $metaValue
-        Write-Success "Added: $metaKey = $metaValue"
+        Write-SuccessMessage "Added: $metaKey = $metaValue"
     }
 
     #---------------------------------------------------------------------------
     # Entitlement information
     #---------------------------------------------------------------------------
     Write-Host ""
-    Write-Info "Note about entitlements:"
+    Write-InfoMessage "Note about entitlements:"
     Write-Host "This license will inherit all entitlements from the selected policy."
     Write-Host "If you need to remove specific entitlements, you can do so via the Keygen UI after creation."
 }
@@ -483,7 +496,7 @@ function Get-LicenseDetails {
 # Step 1: Select the policy for this license
 #-------------------------------------------------------------------------------
 $selectedPolicyId = Select-Policy
-Write-Success "Selected policy ID: $selectedPolicyId"
+Write-SuccessMessage "Selected policy ID: $selectedPolicyId"
 
 #-------------------------------------------------------------------------------
 # Step 2: Collect license details (name and metadata)
@@ -520,19 +533,37 @@ $licensePayload = @{
 }
 
 #-------------------------------------------------------------------------------
-# Step 4: Send the API request
+# Step 4: Confirmation prompt
 #-------------------------------------------------------------------------------
 Write-Host ""
-Write-Warning "Creating license..."
+Write-WarningMessage "Summary:"
+Write-Host "  Policy ID: $selectedPolicyId"
+Write-Host "  License name: $($script:licenseName)"
+if ($script:metadata.Count -gt 0) {
+    Write-Host "  Metadata: $($script:metadata.Count) field(s)"
+}
+Write-Host "  Entitlements: Inherited from policy"
+Write-Host ""
+$confirm = Read-Host "Create this license? [y/N]"
+if ($confirm -notmatch '^[Yy]$') {
+    Write-WarningMessage "Cancelled by user"
+    exit 0
+}
+
+#-------------------------------------------------------------------------------
+# Step 5: Send the API request
+#-------------------------------------------------------------------------------
+Write-Host ""
+Write-WarningMessage "Creating license..."
 
 $response = Invoke-KeygenAPI -Method "POST" -Endpoint "licenses" -Body $licensePayload
 
 #-------------------------------------------------------------------------------
-# Step 5: Handle response and display results
+# Step 6: Handle response and display results
 #-------------------------------------------------------------------------------
 if ($response -and $response.data) {
     Write-Host ""
-    Write-Success "License created successfully!"
+    Write-SuccessMessage "License created successfully!"
 
     # Extract license details
     $licenseId = $response.data.id
@@ -545,7 +576,7 @@ if ($response -and $response.data) {
     }
 
     Write-Host ""
-    Write-Info "License Details:"
+    Write-InfoMessage "License Details:"
     Write-Host "ID: $licenseId"
     Write-Host "Key: $licenseKey"
     Write-Host "Name: $responseLicenseName"
@@ -553,48 +584,48 @@ if ($response -and $response.data) {
 
     # Note about entitlement inheritance
     Write-Host ""
-    Write-Success "License will inherit all entitlements from the selected policy"
+    Write-SuccessMessage "License will inherit all entitlements from the selected policy"
 
     #---------------------------------------------------------------------------
     # Display creation summary
     #---------------------------------------------------------------------------
     Write-Host ""
-    Write-Success "======================================"
-    Write-Success "License Creation Summary:"
-    Write-Success "======================================"
+    Write-SuccessMessage "======================================"
+    Write-SuccessMessage "License Creation Summary:"
+    Write-SuccessMessage "======================================"
     Write-Host "Policy ID: " -NoNewline
-    Write-Info $selectedPolicyId
+    Write-InfoMessage $selectedPolicyId
     Write-Host "License Name: " -NoNewline
-    Write-Info $script:licenseName
+    Write-InfoMessage $script:licenseName
     if ($script:metadata.Count -gt 0) {
         Write-Host "Metadata: " -NoNewline
-        Write-Info "Yes (custom metadata added)"
+        Write-InfoMessage "Yes (custom metadata added)"
     }
     Write-Host "Protected: " -NoNewline
-    Write-Info "No"
+    Write-InfoMessage "No"
     Write-Host "Expiry: " -NoNewline
-    Write-Info "Calculated from policy"
+    Write-InfoMessage "Calculated from policy"
     Write-Host "Entitlements: " -NoNewline
-    Write-Info "Inherited from policy"
+    Write-InfoMessage "Inherited from policy"
     Write-Host "User: " -NoNewline
-    Write-Info "Not assigned"
+    Write-InfoMessage "Not assigned"
     Write-Host "Group: " -NoNewline
-    Write-Info "Not assigned"
+    Write-InfoMessage "Not assigned"
     Write-Host "Next step: " -NoNewline
-    Write-Info "Remove unwanted entitlements via Keygen UI if needed"
+    Write-InfoMessage "Remove unwanted entitlements via Keygen UI if needed"
 
     # Display the license key prominently (this is what the customer uses)
     Write-Host ""
-    Write-Success "LICENSE KEY:"
-    Write-Warning $licenseKey
+    Write-SuccessMessage "LICENSE KEY:"
+    Write-WarningMessage $licenseKey
 
     Write-Host ""
-    Write-Success "Done!"
+    Write-SuccessMessage "Done!"
 }
 else {
     #---------------------------------------------------------------------------
     # Handle API errors
     #---------------------------------------------------------------------------
-    Write-Error "Failed to create license"
+    Write-ErrorMessage "Failed to create license"
     exit 1
 }
